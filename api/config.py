@@ -15,7 +15,7 @@ class Settings:
     API_VERSION: str = "1.0.0"
 
     # Webhook Configuration
-    WEBHOOK_URL: str = "https://webhook.site/3190e69d-ced4-451f-8383-d9cda566c21d"
+    WEBHOOK_URL: str = "https://web.furycloud.io/workspace/genai/verdi-flows/webhook-test/9bcb8b28-65b7-48c4-819e-89b05de0bf98"
 
     # Server Configuration
     SERVER_BASE_URL: str = os.getenv("SERVER_BASE_URL", "https://meuservidor.com")
