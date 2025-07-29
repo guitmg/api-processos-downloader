@@ -18,10 +18,14 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from .config import PJeConfig
+from .database import case_exists, save_case_record
 from .exceptions import (DownloadError, LoginError, NavigationError,
                          ProcessNotFoundError)
 from .utils import (ensure_directory_exists, format_file_size,
                     parse_process_number, setup_logging)
+
+# Diretório para armazenar os PDFs dos processos
+STORAGE_DIR = os.path.join(os.getcwd(), "storage", "processos")
 
 
 class PJeClient:
@@ -333,8 +337,29 @@ class PJeClient:
             raise ProcessNotFoundError(f"Failed to search for process: {e}")
 
     def download_process_document(self, process_number: str) -> Optional[str]:
-        """Download process document and return the file path."""
+        """
+        Download process document and return the file path.
+        
+        Esta função agora assume que a verificação de duplicidade já foi feita
+        antes de inicializar o WebDriver. Mantém uma verificação simples como camada adicional.
+        """
         try:
+            # Garantir que o diretório de storage existe
+            ensure_directory_exists(STORAGE_DIR)
+            
+            self.logger.info(f"🚀 Starting download process for {process_number}")
+            
+            # Verificação adicional (camada de segurança, pois a principal já foi feita)
+            if case_exists(process_number):
+                expected_filename = f"{process_number}.pdf"
+                expected_path = os.path.join(STORAGE_DIR, expected_filename)
+                
+                if os.path.exists(expected_path):
+                    self.logger.info(f"📄 File already exists (secondary check): {expected_path}")
+                    return expected_path
+                else:
+                    self.logger.info("📄 Database record exists but file missing - restoring...")
+
             # Click on process link
             if not self._click_process_link(process_number):
                 raise ProcessNotFoundError(
@@ -349,10 +374,17 @@ class PJeClient:
             if not self._click_download_button():
                 raise DownloadError("Failed to click download button")
 
-            # Wait for PDF tab and download
-            file_path = self._handle_pdf_download()
+            # Wait for PDF tab and download (passar o número do processo)
+            file_path = self._handle_pdf_download(process_number)
             if not file_path:
                 raise DownloadError("Failed to download PDF file")
+
+            # Registrar o processo no banco de dados após download bem-sucedido
+            filename = os.path.basename(file_path)
+            if save_case_record(process_number, filename, "completed"):
+                self.logger.info(f"✅ Process {process_number} registered in database")
+            else:
+                self.logger.warning(f"⚠️ Failed to register process {process_number} in database")
 
             self.logger.info(f"✅ Document downloaded successfully: {file_path}")
             return file_path
@@ -455,8 +487,13 @@ class PJeClient:
             self.logger.error(f"❌ Error clicking download button: {e}")
             return False
 
-    def _handle_pdf_download(self) -> Optional[str]:
-        """Handle PDF tab detection and download."""
+    def _handle_pdf_download(self, process_number: str) -> Optional[str]:
+        """
+        Handle PDF tab detection and download.
+        
+        Args:
+            process_number: Número do processo para nomear o arquivo corretamente
+        """
         try:
             self.logger.info("⏳ Waiting for PDF tab to open...")
 
@@ -478,8 +515,8 @@ class PJeClient:
                     if self.config.FILE_PATTERNS["pdf_url"] in current_url:
                         self.take_screenshot("11_pdf_tab.png")
 
-                        # Download the PDF
-                        file_path = self._download_pdf_from_url(current_url)
+                        # Download the PDF with correct name and path
+                        file_path = self._download_pdf_from_url(current_url, process_number)
 
                         # Close PDF tab and return to process tab
                         self.driver.close()
@@ -497,31 +534,65 @@ class PJeClient:
             self.logger.error(f"❌ Error handling PDF download: {e}")
             return None
 
-    def _download_pdf_from_url(self, pdf_url: str) -> Optional[str]:
-        """Download PDF file from URL."""
+    def _download_pdf_from_url(self, pdf_url: str, process_number: str) -> Optional[str]:
+        """
+        Download PDF file from URL with correct naming and storage location.
+        
+        Args:
+            pdf_url: URL do arquivo PDF para download
+            process_number: Número do processo para nomear o arquivo
+        """
         try:
-            self.logger.info(f"⬇️ Downloading PDF from URL...")
+            self.logger.info(f"⬇️ Downloading PDF from URL for process {process_number}...")
 
-            # Generate filename
-            filename = f"processo_{int(time.time())}.pdf"
-            file_path = os.path.join(self.config.DATA_DIR, filename)
+            # Garantir que o diretório de destino existe
+            ensure_directory_exists(STORAGE_DIR)
+
+            # Usar o número do processo como nome do arquivo
+            filename = f"{process_number}.pdf"
+            file_path = os.path.join(STORAGE_DIR, filename)
+
+            self.logger.info(f"📂 Saving file to: {file_path}")
+
+            # Verificar se o arquivo já existe (proteção adicional)
+            if os.path.exists(file_path):
+                self.logger.warning(f"⚠️ File {file_path} already exists, will overwrite")
 
             # Download file
             response = requests.get(pdf_url, stream=True, timeout=30)
             response.raise_for_status()
 
+            # Salvar o arquivo em chunks para otimizar memória
             with open(file_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
+                    if chunk:  # Filtrar chunks vazios
+                        f.write(chunk)
 
+            # Verificar se o arquivo foi salvo corretamente
             if os.path.exists(file_path):
                 file_size = os.path.getsize(file_path)
-                self.logger.info(f"✅ PDF downloaded: {file_path}")
-                self.logger.info(f"📄 File size: {format_file_size(file_size)}")
-                return file_path
+                
+                # Validar se o arquivo não está vazio
+                if file_size > 0:
+                    self.logger.info(f"✅ PDF downloaded successfully: {file_path}")
+                    self.logger.info(f"📄 File size: {format_file_size(file_size)}")
+                    self.logger.info(f"🏷️ Process number: {process_number}")
+                    return file_path
+                else:
+                    self.logger.error(f"❌ Downloaded file is empty: {file_path}")
+                    # Remover arquivo vazio
+                    os.remove(file_path)
+                    return None
+            else:
+                self.logger.error(f"❌ File was not created: {file_path}")
+                return None
 
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"❌ Network error downloading PDF: {e}")
             return None
-
+        except OSError as e:
+            self.logger.error(f"❌ File system error downloading PDF: {e}")
+            return None
         except Exception as e:
-            self.logger.error(f"❌ Error downloading PDF: {e}")
+            self.logger.error(f"❌ Unexpected error downloading PDF: {e}")
             return None

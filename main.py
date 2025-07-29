@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 from pje_automation import PJeClient
+from pje_automation.database import case_exists, get_database
 from pje_automation.exceptions import PJeAutomationError
 
 # Webhook configuration
@@ -96,6 +97,49 @@ def main():
     print("=" * 50)
 
     try:
+        # Step 0: Verificar se o processo já existe antes de inicializar o WebDriver
+        print(f"\n🔍 Step 0: Checking if process {PROCESS_NUMBER} already exists...")
+        
+        if case_exists(PROCESS_NUMBER):
+            print(f"⚠️ Process {PROCESS_NUMBER} already exists in database!")
+            
+            # Buscar informações do processo existente
+            db = get_database()
+            case_info = db.get_case_info(PROCESS_NUMBER)
+            
+            if case_info:
+                print(f"📄 File: {case_info['file_name']}")
+                print(f"📅 Downloaded: {case_info['download_date']}")
+                print(f"📊 Status: {case_info['processing_status']}")
+                
+                # Verificar se o arquivo físico existe
+                expected_path = os.path.join("storage", "processos", case_info['file_name'])
+                if os.path.exists(expected_path):
+                    print(f"✅ File exists at: {expected_path}")
+                    
+                    # Gerar URL pública para o arquivo existente
+                    arquivo_url = f"{SERVER_BASE_URL}/static/{case_info['file_name']}"
+                    
+                    # Enviar webhook de sucesso com arquivo existente
+                    send_webhook(
+                        numero_processo=PROCESS_NUMBER,
+                        status="sucesso",
+                        arquivo_url=arquivo_url,
+                        arquivo_caminho=expected_path,
+                    )
+                    
+                    print(f"📋 Process already processed successfully - no download needed!")
+                    print(f"🎉 Automation completed (skipped duplicate)!")
+                    return  # Sair sem fazer download
+                    
+                else:
+                    print(f"⚠️ Database record exists but file not found: {expected_path}")
+                    print(f"🔄 Will proceed with download to restore missing file...")
+            else:
+                print(f"⚠️ Database inconsistency detected - proceeding with download...")
+        else:
+            print(f"✅ Process {PROCESS_NUMBER} not found in database - proceeding with download...")
+
         # Use context manager for automatic cleanup
         with PJeClient(headless=HEADLESS, log_level=LOG_LEVEL) as client:
             # Step 1: Login

@@ -100,3 +100,12 @@ docs/_build/
 samples/
 config/local_*.py
 config/dev_*.py
+
+# Database and Storage
+*.db
+*.sqlite
+*.sqlite3
+case_records.db
+test_case_records.db
+storage/processos/
+storage/

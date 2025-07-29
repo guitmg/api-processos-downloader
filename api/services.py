@@ -15,6 +15,10 @@ import httpx
 from .config import settings
 from .models import WebhookPayload
 
+# Adicionar path para acessar módulos do projeto
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+from pje_automation.database import case_exists, get_database
+
 logger = logging.getLogger(__name__)
 
 
@@ -25,12 +29,52 @@ class ProcessoService:
     async def iniciar_download(numero_processo: str) -> None:
         """
         Start async download process for the given processo number.
+        
+        Verifica primeiro se o processo já existe antes de executar o script completo.
 
         Args:
             numero_processo: The process number to download
         """
         try:
             logger.info(f"Iniciando download para processo: {numero_processo}")
+            
+            # Verificar se o processo já existe antes de executar o script
+            logger.info(f"Verificando se processo {numero_processo} já existe...")
+            
+            if case_exists(numero_processo):
+                logger.info(f"Processo {numero_processo} já existe no banco de dados!")
+                
+                # Buscar informações do processo existente
+                db = get_database()
+                case_info = db.get_case_info(numero_processo)
+                
+                if case_info:
+                    logger.info(f"Arquivo: {case_info['file_name']}")
+                    logger.info(f"Status: {case_info['processing_status']}")
+                    logger.info(f"Download: {case_info['download_date']}")
+                    
+                    # Verificar se o arquivo físico existe
+                    storage_path = Path(__file__).parent.parent / "storage" / "processos"
+                    expected_path = storage_path / case_info['file_name']
+                    
+                    if expected_path.exists():
+                        logger.info(f"Arquivo existe em: {expected_path}")
+                        
+                        # Enviar webhook de sucesso para processo já existente
+                        await ProcessoService._enviar_webhook_sucesso_existente(
+                            numero_processo, str(expected_path), case_info['file_name']
+                        )
+                        
+                        logger.info(f"Processo {numero_processo} já processado - download desnecessário!")
+                        return  # Sair sem executar o script
+                        
+                    else:
+                        logger.warning(f"Registro existe mas arquivo não encontrado: {expected_path}")
+                        logger.info("Executando script para restaurar arquivo faltante...")
+                else:
+                    logger.warning("Inconsistência no banco - executando script...")
+            else:
+                logger.info(f"Processo {numero_processo} não encontrado - executando download...")
 
             # Execute the script asynchronously
             await ProcessoService._executar_script_async(numero_processo)
@@ -154,6 +198,46 @@ class ProcessoService:
         except Exception as e:
             logger.error(f"Erro ao extrair caminho do arquivo: {e}")
             return None
+
+    @staticmethod
+    async def _enviar_webhook_sucesso_existente(
+        numero_processo: str, arquivo_caminho: str, arquivo_nome: str
+    ) -> None:
+        """
+        Enviar webhook de sucesso para processo já existente.
+        
+        Args:
+            numero_processo: Número do processo
+            arquivo_caminho: Caminho local do arquivo existente
+            arquivo_nome: Nome do arquivo
+        """
+        try:
+            # Gerar URL pública para o arquivo existente
+            arquivo_url = settings.get_file_url(arquivo_nome)
+            
+            payload = WebhookPayload(
+                numero_processo=numero_processo,
+                status="sucesso",
+                arquivo_url=arquivo_url,
+                arquivo_caminho=arquivo_caminho,
+                message=f"Processo {numero_processo} já processado anteriormente"
+            )
+            
+            logger.info(f"Enviando webhook de sucesso (existente) para {numero_processo}")
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    settings.WEBHOOK_URL,
+                    json=payload.model_dump(),
+                    timeout=30.0
+                )
+                response.raise_for_status()
+                logger.info(f"Webhook de sucesso enviado para processo {numero_processo}")
+                
+        except httpx.HTTPError as e:
+            logger.error(f"Erro HTTP ao enviar webhook para {numero_processo}: {e}")
+        except Exception as e:
+            logger.error(f"Erro inesperado ao enviar webhook para {numero_processo}: {e}")
 
     @staticmethod
     async def _enviar_webhook_sucesso(
